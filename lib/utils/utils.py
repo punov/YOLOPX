@@ -49,33 +49,103 @@ def create_logger(cfg, cfg_path, phase='train', rank=-1):
         return None, None, None
 
 
-def select_device(logger=None, device='', batch_size=None):
-    # device = 'cpu' or '0' or '0,1,2,3'
-    cpu_request = device.lower() == 'cpu'
-    if device and not cpu_request:  # if device requested other than 'cpu'
-        os.environ['CUDA_VISIBLE_DEVICES'] = device  # set environment variable
-        assert torch.cuda.is_available(), 'CUDA unavailable, invalid device %s requested' % device  # check availablity
+def select_device(logger=None, device: str = "") -> torch.device:
+    """
+    Cross-platform device picker.
+    Accepts: "", "auto", "cpu", "mps", "cuda", "cuda:0", "0", "0,1", etc.
+    Prefers CUDA (if explicitly requested or available), then MPS, then CPU.
+    Never asserts on CUDA when unavailable; falls back gracefully.
+    """
+    d = (device or "").strip().lower()
 
-    cuda = False if cpu_request else torch.cuda.is_available()
-    if cuda:
-        c = 1024 ** 2  # bytes to MB
-        ng = torch.cuda.device_count()
-        if ng > 1 and batch_size:  # check that batch_size is compatible with device_count
-            assert batch_size % ng == 0, 'batch-size %g not multiple of GPU count %g' % (batch_size, ng)
-        x = [torch.cuda.get_device_properties(i) for i in range(ng)]
-        s = f'Using torch {torch.__version__} '
-        for i in range(0, ng):
-            if i == 1:
-                s = ' ' * len(s)
-            if logger:
-                logger.info("%sCUDA:%g (%s, %dMB)" % (s, i, x[i].name, x[i].total_memory / c))
-    else:
-        if logger:
-            logger.info(f'Using torch {torch.__version__} CPU')
+    def log(msg):
+        if logger is not None:
+            try:
+                logger.info(msg)
+            except Exception:
+                print(msg)
+        else:
+            print(msg)
 
-    if logger:
-        logger.info('')  # skip a line
-    return torch.device('cuda:0' if cuda else 'cpu')
+    # Helper: MPS availability (Apple Silicon)
+    def mps_ok():
+        try:
+            return torch.backends.mps.is_available() and torch.backends.mps.is_built()
+        except Exception:
+            return False
+
+    # Normalize some aliases
+    if d in ("", "auto", "default"):
+        # Auto-pick: prefer CUDA, then MPS, else CPU
+        if torch.cuda.is_available():
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)  # respect user's setup
+            log("Auto device: CUDA")
+            return torch.device("cuda:0")
+        if mps_ok():
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""       # ensure no CUDA path is touched
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            log("Auto device: MPS (Apple Silicon)")
+            return torch.device("mps")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""           # force CPU path
+        log("Auto device: CPU")
+        return torch.device("cpu")
+
+    if d in ("cpu",):
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""           # disable CUDA
+        log("Device: CPU")
+        return torch.device("cpu")
+
+    if d in ("mps",):
+        if mps_ok():
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            log("Device: MPS")
+            return torch.device("mps")
+        log("Requested MPS but it's unavailable; falling back to CPU.")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        return torch.device("cpu")
+
+    # CUDA-style strings: "cuda", "cuda:0"
+    if d.startswith("cuda"):
+        if torch.cuda.is_available():
+            log(f"Device: {d}")
+            return torch.device(d)
+        log("Requested CUDA but it's unavailable; falling back to CPU/MPS.")
+        if mps_ok():
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            log("Fallback: MPS")
+            return torch.device("mps")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        log("Fallback: CPU")
+        return torch.device("cpu")
+
+    # Numeric GPU indices like "0" or "0,1"
+    if d.replace(",", "").isdigit():
+        if torch.cuda.is_available():
+            os.environ["CUDA_VISIBLE_DEVICES"] = d
+            first = d.split(",")[0]
+            log(f"Device: cuda:{first} (CUDA_VISIBLE_DEVICES={d})")
+            return torch.device(f"cuda:{first}")
+        log("Requested CUDA index but CUDA is unavailable; falling back to CPU/MPS.")
+        if mps_ok():
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            log("Fallback: MPS")
+            return torch.device("mps")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        log("Fallback: CPU")
+        return torch.device("cpu")
+
+    # Last-resort: try to construct a torch.device or default to CPU
+    try:
+        dev = torch.device(d)
+        log(f"Device: {dev}")
+        return dev
+    except Exception:
+        log(f"Unrecognized device '{device}', falling back to CPU.")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        return torch.device("cpu")
 
 
 def get_optimizer(cfg, model):

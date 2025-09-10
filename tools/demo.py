@@ -45,7 +45,7 @@ def detect(cfg,opt):
         
     os.makedirs(opt.save_dir, exist_ok=True)  # 直接创建，如果已存在则忽略
     
-    half = device.type != 'cpu'  # half precision only supported on CUDA
+    half = (device.type == "cuda")  # half precision only supported on CUDA
 
     # Load model
     model = get_net(cfg)
@@ -55,6 +55,8 @@ def detect(cfg,opt):
     model = model.to(device)
     if half:
         model.half()  # to FP16
+    else:
+        model.float()
 
     # Set Dataloader
     if opt.source.isnumeric():

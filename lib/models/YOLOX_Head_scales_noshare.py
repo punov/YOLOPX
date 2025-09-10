@@ -178,27 +178,44 @@ class YOLOXHead(nn.Module):
                 [x.flatten(start_dim=2) for x in outputs], dim=2
             ).permute(0, 2, 1) # b, 4*h*w, c
             if self.decode_in_inference:
-                return self.decode_outputs(inf_outputs, dtype=xin[0].type()), outputs
+                return self.decode_outputs(
+                    inf_outputs,
+                    dtype=xin[0].dtype,
+                    device=xin[0].device
+                ), outputs
             else:
                 return outputs
 
-    def decode_outputs(self, outputs, dtype):
+    def decode_outputs(self, outputs, dtype, device=None):
+        # Ensure we use real device/dtype objects
+        if device is None:
+            device = outputs.device
+
+        # MPS prefers float32; avoid float16 there
+        if device.type == "mps" and dtype == torch.float16:
+            dtype = torch.float32
+
         grids = []
         strides = []
         for (hsize, wsize), stride in zip(self.hw, self.strides):
-            yv, xv = meshgrid([torch.arange(hsize), torch.arange(wsize)])
-            grid = torch.stack((xv, yv), 2).view(1, -1, 2)
+            # Build grids directly on the right device/dtype, and silence the meshgrid warning
+            y = torch.arange(hsize, device=device, dtype=torch.int64)
+            x = torch.arange(wsize, device=device, dtype=torch.int64)
+            yv, xv = torch.meshgrid(y, x, indexing="ij")
+            grid = torch.stack((xv, yv), 2).view(1, -1, 2).to(device=device, dtype=dtype)
             grids.append(grid)
-            shape = grid.shape[:2]
-            strides.append(torch.full((*shape, 1), stride))
 
-        grids = torch.cat(grids, dim=1).type(dtype)
-        strides = torch.cat(strides, dim=1).type(dtype)
+            npos = grid.shape[1]
+            stride_tensor = torch.full((1, npos, 1), stride, device=device, dtype=dtype)
+            strides.append(stride_tensor)
 
-        outputs[..., :2] = (outputs[..., :2] + grids) * strides # xy投影到输入图像
-        outputs[..., 2:4] = torch.exp(outputs[..., 2:4]) * strides # wh投影到输入图像
-        # print(outputs.size())
-        # exit(0)
-        # b, 4*h*w, 6
-        # 特征图上每一点输出bbox的中心点坐标与wh
+        grids = torch.cat(grids, dim=1)    # already correct device/dtype
+        strides = torch.cat(strides, dim=1)
+
+        # Make sure outputs match
+        outputs = outputs.to(device=device, dtype=dtype)
+
+        # Standard YOLO decoding
+        outputs[..., :2] = (outputs[..., :2] + grids) * strides
+        outputs[..., 2:4] = torch.exp(outputs[..., 2:4]) * strides
         return outputs
