@@ -17,3 +17,4 @@ ptflops
 prefetch-generator
 pretrainedmodels
 h5py
+loguru
