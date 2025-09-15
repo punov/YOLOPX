@@ -3,6 +3,14 @@ import torch
 from torch import nn, optim
 from torch.cuda.amp import autocast, GradScaler
 
+from torchvision import transforms
+import lib.dataset as dataset
+try:
+    from lib.utils import DataLoaderX
+except Exception:
+    from torch.utils.data import DataLoader as DataLoaderX
+from lib.config import cfg
+
 from lib.core.distill import SegDistiller
 
 def build_teacher(ckpt_path: str, device, fp16_ckpt: bool = True):
@@ -25,13 +33,39 @@ def build_student(width_mult: float, device):
     return student.to(device).train()
 
 def get_dataloaders(args):
-    """
-    !!! important !!! I stripped the vehicle detections, so we focus on Driving Area and Lane Lines only here
-    The batch should yield:
-      images: [B,3,H,W] float, 0..1
-      targets: {"da": Long[B,H,W] or {0,1}, "ll": Long[B,H,W] or {0,1]}
-    """
-    raise NotImplementedError("Wire this to your dataset pipeline.")
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+
+    DSClass = getattr(dataset, cfg.DATASET.DATASET)
+    train_dataset = DSClass(cfg=cfg, is_train=True,
+                            inputsize=cfg.MODEL.IMAGE_SIZE,
+                            transform=transforms.Compose([transforms.ToTensor(), normalize]))
+    val_dataset   = DSClass(cfg=cfg, is_train=False,
+                            inputsize=cfg.MODEL.IMAGE_SIZE,
+                            transform=transforms.Compose([transforms.ToTensor(), normalize]))
+
+    batch_size_train = getattr(args, "batch", None) or (cfg.TRAIN.BATCH_SIZE_PER_GPU * max(1, len(cfg.GPUS)))
+    batch_size_val   = min(batch_size_train, getattr(args, "val_batch", 8))
+    num_workers      = getattr(args, "workers", None) or cfg.WORKERS
+
+    train_loader = DataLoaderX(
+        train_dataset,
+        batch_size=batch_size_train,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=cfg.PIN_MEMORY,
+        collate_fn=dataset.AutoDriveDataset.collate_fn
+    )
+    val_loader = DataLoaderX(
+        val_dataset,
+        batch_size=batch_size_val,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=cfg.PIN_MEMORY,
+        collate_fn=dataset.AutoDriveDataset.collate_fn
+    )
+    return train_loader, val_loader
+
 
 def set_fast_mode():
     torch.backends.cudnn.benchmark = True
